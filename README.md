@@ -22,7 +22,7 @@
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/zevs-scanner.git
+git clone https://github.com/zorayrsaroyan/zevs-scanner.git
 cd zevs-scanner
 ```
 
