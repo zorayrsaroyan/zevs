@@ -11,10 +11,18 @@ import sys
 import re
 import threading
 import time
+import os
 from urllib.parse import urlparse, urljoin
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional, Set
+
+# Enable ANSI colors on Windows
+if sys.platform == "win32":
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
 
 
 class Colors:
@@ -32,12 +40,38 @@ class Colors:
 class LiveLogger:
     """Real-time request/response logger with thread safety"""
 
-    def __init__(self):
+    def __init__(self, target: str):
         self.lock = threading.Lock()
         self.request_counter = 0
         self.start_time = time.time()
         self.module_stats = []
         self.findings_count = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+
+        # Create log file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        domain = urlparse(target).netloc.replace(":", "_")
+        self.log_file = f"zevs_scan_{domain}_{timestamp}.log"
+        self.log_handle = open(self.log_file, "w", encoding="utf-8")
+        self._write_log(
+            f"ZEVS v1.1 LIVE Scan Log\nTarget: {target}\nStarted: {datetime.now()}\n{'=' * 70}\n"
+        )
+
+    def _write_log(self, message: str):
+        """Write to log file"""
+        try:
+            # Strip ANSI codes for log file
+            clean_msg = re.sub(r"\033\[[0-9;]+m", "", message)
+            self.log_handle.write(clean_msg + "\n")
+            self.log_handle.flush()
+        except:
+            pass
+
+    def __del__(self):
+        """Close log file"""
+        try:
+            self.log_handle.close()
+        except:
+            pass
 
     def get_request_number(self):
         with self.lock:
@@ -54,15 +88,19 @@ class LiveLogger:
     ):
         """Log outgoing HTTP request"""
         with self.lock:
-            print(f"\n{Colors.CYAN}{'-' * 70}{Colors.END}")
-            print(f"{Colors.CYAN}[-> REQUEST #{req_num:03d}] {method} {url}{Colors.END}")
+            msg = f"\n{Colors.CYAN}{'-' * 70}{Colors.END}\n"
+            msg += (
+                f"{Colors.CYAN}[-> REQUEST #{req_num:03d}] {method} {url}{Colors.END}\n"
+            )
             if headers:
-                print(f"{Colors.GRAY}Headers:{Colors.END}")
-                for k, v in list(headers.items())[:5]:  # Show first 5 headers
-                    print(f"  {k}: {v[:60]}...")
+                msg += f"{Colors.GRAY}Headers:{Colors.END}\n"
+                for k, v in list(headers.items())[:5]:
+                    msg += f"  {k}: {v[:60]}...\n"
             if body:
-                print(f"{Colors.GRAY}Body: {body[:100]}...{Colors.END}")
-            print(f"{Colors.CYAN}{'-' * 70}{Colors.END}")
+                msg += f"{Colors.GRAY}Body: {body[:100]}...{Colors.END}\n"
+            msg += f"{Colors.CYAN}{'-' * 70}{Colors.END}"
+            print(msg)
+            self._write_log(msg)
 
     def log_response(
         self,
@@ -82,9 +120,7 @@ class LiveLogger:
                 if 300 <= status < 400
                 else Colors.RED
             )
-            print(
-                f"{status_color}[<- RESPONSE #{req_num:03d}] {status} | {time_taken:.2f}s | {size} bytes{Colors.END}"
-            )
+            msg = f"{status_color}[<- RESPONSE #{req_num:03d}] {status} | {time_taken:.2f}s | {size} bytes{Colors.END}\n"
             if headers:
                 important_headers = [
                     "content-type",
@@ -92,14 +128,15 @@ class LiveLogger:
                     "x-powered-by",
                     "x-frame-options",
                 ]
-                print(f"{Colors.GRAY}Headers:{Colors.END}")
+                msg += f"{Colors.GRAY}Headers:{Colors.END}\n"
                 for k in important_headers:
                     if k in headers:
-                        print(f"  {k}: {headers[k][:60]}")
+                        msg += f"  {k}: {headers[k][:60]}\n"
             if body_preview:
-                print(f"{Colors.GRAY}Body Preview:{Colors.END}")
-                print(f"  {body_preview[:200]}...")
-            print()
+                msg += f"{Colors.GRAY}Body Preview:{Colors.END}\n"
+                msg += f"  {body_preview[:200]}...\n"
+            print(msg)
+            self._write_log(msg)
 
     def log_vuln_found(
         self, vuln_type: str, severity: str, url: str, payload: str, evidence: str
@@ -214,7 +251,7 @@ class VulnScanner:
         self.threads = threads
         self.findings: List[Dict[str, Any]] = []
         self.discovered_endpoints: Set[str] = set()
-        self.logger = LiveLogger()
+        self.logger = LiveLogger(self.target)
         self.module_request_count = 0
         self.module_finding_count = 0
         self.module_start_time = 0
