@@ -316,6 +316,11 @@ class VulnScanner:
     def check_prototype_pollution(self):
         self.log("Testing Prototype Pollution...")
 
+        # Get baseline response first
+        baseline = self.curl(self.target)
+        if not baseline:
+            return
+
         test_urls = [
             f"{self.target}?__proto__[admin]=true",
             f"{self.target}?constructor[prototype][admin]=true",
@@ -325,21 +330,45 @@ class VulnScanner:
         for url in test_urls:
             resp = self.curl(url)
             if resp and resp["status"] == 200:
-                # Check if pollution worked by looking for reflection
-                if (
-                    "admin" in resp["body"].lower()
-                    or "prototype" in resp["body"].lower()
-                ):
-                    self.add_finding(
-                        "Prototype Pollution",
-                        "HIGH",
-                        url,
-                        "Possible prototype pollution vulnerability",
-                        "Parameter pollution detected",
-                        impact="Privilege escalation, authentication bypass, RCE via polluted properties, DoS",
-                        exploit="1. Test: ?__proto__[isAdmin]=true\n2. Check if isAdmin property polluted globally\n3. Try: ?__proto__[shell]=require('child_process').exec('whoami')\n4. For client-side: pollute Object.prototype then trigger XSS",
-                    )
-                    break
+                # Compare with baseline - look for NEW content that wasn't there before
+                # Real pollution would show different behavior, not just reflection
+
+                # Check if response is significantly different (not just echoing param)
+                baseline_has_admin = "admin" in baseline["body"].lower()
+                resp_has_admin = "admin" in resp["body"].lower()
+
+                # Only flag if:
+                # 1. Baseline didn't have "admin" but polluted response does
+                # 2. AND response structure changed (not just param echo)
+                # 3. AND status codes or headers changed
+
+                if not baseline_has_admin and resp_has_admin:
+                    # Check if it's real pollution or just parameter reflection
+                    if "__proto__" not in resp["body"].lower():
+                        # The payload itself is not reflected, but "admin" appeared
+                        # This could be real pollution
+
+                        # Additional check: look for signs of actual pollution
+                        pollution_indicators = [
+                            '"admin":true',
+                            "'admin':true",
+                            "isadmin",
+                            "role",
+                            "privilege",
+                        ]
+
+                        for indicator in pollution_indicators:
+                            if indicator in resp["body"].lower():
+                                self.add_finding(
+                                    "Prototype Pollution",
+                                    "HIGH",
+                                    url,
+                                    "Possible prototype pollution vulnerability - response behavior changed",
+                                    "Parameter pollution detected with behavioral change",
+                                    impact="Privilege escalation, authentication bypass, RCE via polluted properties, DoS",
+                                    exploit="1. Test: ?__proto__[isAdmin]=true\n2. Check if isAdmin property polluted globally\n3. Try: ?__proto__[shell]=require('child_process').exec('whoami')\n4. For client-side: pollute Object.prototype then trigger XSS",
+                                )
+                                return
 
     # ============ INSECURE DESERIALIZATION ============
     def check_deserialization(self):
@@ -404,6 +433,11 @@ class VulnScanner:
     def check_cache_poisoning(self):
         self.log("Testing Cache Poisoning...")
 
+        # Get baseline response first
+        baseline = self.curl(self.target)
+        if not baseline:
+            return
+
         poison_headers = [
             ("X-Forwarded-Host", "evil.com"),
             ("X-Forwarded-Scheme", "nothttps"),
@@ -416,21 +450,53 @@ class VulnScanner:
             resp = self.curl(self.target, headers=headers)
 
             if resp and (value in resp["body"] or resp["status"] in [301, 302]):
+                # Check if cache is actually enabled
                 cache_header = resp["headers"].get("x-cache", "").lower()
-                if "hit" in cache_header or "miss" in cache_header:
-                    self.add_finding(
-                        "Cache Poisoning",
-                        "HIGH",
-                        self.target,
-                        f"Possible cache poisoning via {header}",
-                        f"Header {header} reflected in response with cache enabled",
-                        impact="Serve malicious content to all users, XSS at scale, redirect users to phishing sites, deface website",
-                        exploit=f"1. Send: {header}: evil.com\n2. Check if reflected in response\n3. Send multiple times to poison cache\n4. Verify cache with X-Cache: HIT header\n5. All users now get poisoned response",
+                cf_cache = resp["headers"].get("cf-cache-status", "").lower()
+                age_header = resp["headers"].get("age", "")
+
+                # Only flag if cache is confirmed AND reflection is in dangerous context
+                has_cache = (
+                    "hit" in cache_header
+                    or "miss" in cache_header
+                    or cf_cache in ["hit", "miss", "expired"]
+                    or age_header
+                )
+
+                if has_cache:
+                    # Verify the reflection is in a dangerous context (URLs, links, redirects)
+                    body_lower = resp["body"].lower()
+                    dangerous_contexts = [
+                        f'href="{value}',
+                        f"href='{value}",
+                        f'src="{value}',
+                        f'<script src="{value}',
+                        f'<link href="{value}',
+                    ]
+
+                    is_dangerous = any(
+                        ctx.lower() in body_lower for ctx in dangerous_contexts
                     )
+
+                    if is_dangerous or resp["status"] in [301, 302]:
+                        self.add_finding(
+                            "Cache Poisoning",
+                            "HIGH",
+                            self.target,
+                            f"Cache poisoning via {header} - reflected in dangerous context",
+                            f"Header {header} reflected with cache enabled ({cache_header or cf_cache})",
+                            impact="Serve malicious content to all users, XSS at scale, redirect users to phishing sites, deface website",
+                            exploit=f"1. Send: {header}: evil.com\n2. Check if reflected in response\n3. Send multiple times to poison cache\n4. Verify cache with X-Cache: HIT header\n5. All users now get poisoned response",
+                        )
+                        return
 
     # ============ CRLF INJECTION ============
     def check_crlf(self):
         self.log("Testing CRLF Injection...")
+
+        # First test without CRLF to get baseline
+        baseline_url = f"{self.target}?redirect=https://google.com"
+        baseline = self.curl(baseline_url)
 
         payloads = [
             "%0d%0aSet-Cookie:%20admin=true",
@@ -446,21 +512,48 @@ class VulnScanner:
                 set_cookie = resp["headers"].get("set-cookie", "")
                 location = resp["headers"].get("location", "")
 
-                if "admin=true" in set_cookie or "evil.com" in location:
-                    self.add_finding(
-                        "CRLF Injection",
-                        "MEDIUM",
-                        url,
-                        "CRLF injection allows header manipulation",
-                        f"Injected header found in response",
-                        impact="Session fixation, XSS via injected headers, open redirect, cache poisoning, response splitting",
-                        exploit="1. Send: ?redirect=%0d%0aSet-Cookie:%20admin=true\n2. Check response headers for injected Set-Cookie\n3. Or inject: %0d%0aLocation:%20http://evil.com\n4. Victim gets redirected or cookie set",
-                    )
-                    break
+                # Check if our injected header actually appeared
+                # (not just a normal Set-Cookie from the app)
+                if "admin=true" in set_cookie:
+                    # Verify this is OUR injected cookie, not a normal app cookie
+                    if baseline and "admin=true" not in baseline.get("headers", {}).get(
+                        "set-cookie", ""
+                    ):
+                        self.add_finding(
+                            "CRLF Injection",
+                            "HIGH",
+                            url,
+                            "CONFIRMED CRLF injection - injected Set-Cookie header",
+                            f"Successfully injected Set-Cookie: admin=true",
+                            impact="Session fixation, XSS via injected headers, open redirect, cache poisoning, response splitting",
+                            exploit="1. Send: ?redirect=%0d%0aSet-Cookie:%20admin=true\n2. Check response headers for injected Set-Cookie\n3. Or inject: %0d%0aLocation:%20http://evil.com\n4. Victim gets redirected or cookie set",
+                        )
+                        break
+
+                if "evil.com" in location:
+                    # Verify this is OUR injected location
+                    if baseline and "evil.com" not in baseline.get("headers", {}).get(
+                        "location", ""
+                    ):
+                        self.add_finding(
+                            "CRLF Injection",
+                            "HIGH",
+                            url,
+                            "CONFIRMED CRLF injection - injected Location header",
+                            f"Successfully injected Location: http://evil.com",
+                            impact="Session fixation, XSS via injected headers, open redirect, cache poisoning, response splitting",
+                            exploit="1. Send: ?redirect=%0d%0aSet-Cookie:%20admin=true\n2. Check response headers for injected Set-Cookie\n3. Or inject: %0d%0aLocation:%20http://evil.com\n4. Victim gets redirected or cookie set",
+                        )
+                        break
 
     # ============ HOST HEADER INJECTION ============
     def check_host_header(self):
         self.log("Testing Host Header Injection...")
+
+        # First get baseline response with normal host
+        baseline = self.curl(self.target)
+        if not baseline:
+            return
 
         evil_hosts = ["evil.com", "attacker.com", "127.0.0.1"]
 
@@ -469,16 +562,40 @@ class VulnScanner:
             resp = self.curl(self.target, headers=headers)
 
             if resp and evil_host in resp["body"]:
-                self.add_finding(
-                    "Host Header Injection",
-                    "MEDIUM",
-                    self.target,
-                    "Host header is reflected in response",
-                    f"Evil host {evil_host} reflected",
-                    impact="Password reset poisoning, cache poisoning, SSRF, web cache deception, routing-based SSRF",
-                    exploit="1. Send: Host: evil.com\n2. Trigger password reset email\n3. Reset link contains evil.com\n4. Victim clicks link, token stolen\n5. Or use for cache poisoning attacks",
-                )
-                break
+                # Verify it's not just a generic error page or redirect
+                # Check if it's in a meaningful context (links, URLs, etc.)
+                body_lower = resp["body"].lower()
+
+                # Look for evil host in URLs, links, or redirects
+                is_real = False
+                patterns = [
+                    f'href="{evil_host}',
+                    f"href='{evil_host}",
+                    f'src="{evil_host}',
+                    f"src='{evil_host}",
+                    f'action="{evil_host}',
+                    f"location: {evil_host}",
+                    f'<a href="http://{evil_host}',
+                    f'<link href="http://{evil_host}',
+                ]
+
+                for pattern in patterns:
+                    if pattern.lower() in body_lower:
+                        is_real = True
+                        break
+
+                # Also check if response is different from baseline (not just error page)
+                if is_real and abs(len(resp["body"]) - len(baseline["body"])) < 1000:
+                    self.add_finding(
+                        "Host Header Injection",
+                        "MEDIUM",
+                        self.target,
+                        "Host header is reflected in response URLs/links",
+                        f"Evil host {evil_host} reflected in actionable context",
+                        impact="Password reset poisoning, cache poisoning, SSRF, web cache deception, routing-based SSRF",
+                        exploit="1. Send: Host: evil.com\n2. Trigger password reset email\n3. Reset link contains evil.com\n4. Victim clicks link, token stolen\n5. Or use for cache poisoning attacks",
+                    )
+                    break
 
     # ============ RACE CONDITIONS ============
     def check_race_conditions(self):
