@@ -75,7 +75,7 @@
 ## 📦 Installation
 
 ```bash
-git clone https://github.com/saroyanzorayr-source/zevs.git
+git clone https://github.com/zorayrsaroyan/zevs.git
 cd zevs
 ```
 
@@ -390,7 +390,7 @@ MIT License - See [LICENSE](LICENSE) for details
 ## 🙏 Credits
 
 **Author:** Z3VS Team  
-**GitHub:** https://github.com/saroyanzorayr-source/zevs  
+**GitHub:** https://github.com/zorayrsaroyan/zevs  
 **Version:** 1.1.0  
 **License:** MIT
 
@@ -400,8 +400,8 @@ MIT License - See [LICENSE](LICENSE) for details
 
 ## 📞 Support
 
-- **Issues:** https://github.com/saroyanzorayr-source/zevs/issues
-- **Discussions:** https://github.com/saroyanzorayr-source/zevs/discussions
+- **Issues:** https://github.com/zorayrsaroyan/zevs/issues
+- **Discussions:** https://github.com/zorayrsaroyan/zevs/discussions
 
 ---
 
