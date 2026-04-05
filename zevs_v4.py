@@ -1363,13 +1363,13 @@ class ZevsScanner:
 
         # Legal disclaimer
         console.print(
-            "\n[bold red]═══════════════════════════════════════════════════════════════[/bold red]"
+            "\n[bold red]================================================================[/bold red]"
         )
         console.print(
             "[bold yellow]                    ZEVS v4.0 - LEGAL DISCLAIMER[/bold yellow]"
         )
         console.print(
-            "[bold red]═══════════════════════════════════════════════════════════════[/bold red]"
+            "[bold red]================================================================[/bold red]"
         )
         console.print(
             "\n[yellow]This tool is for AUTHORIZED security testing ONLY.[/yellow]"
@@ -1395,16 +1395,16 @@ class ZevsScanner:
             rate_limiter = SmartRateLimiter(requests_per_second=rate_limit)
 
             # Step 1: Crawl
-            console.print(f"\n[bold cyan]🕷️  Step 1: Crawling {self.target}[/bold cyan]")
+            console.print(f"\n[bold cyan][CRAWL]  Step 1: Crawling {self.target}[/bold cyan]")
             crawler = Crawler(client, rate_limiter, max_depth=2, max_urls=200)
             urls, params_map = await crawler.crawl(self.target)
             self.stats["urls_crawled"] = len(urls)
             console.print(
-                f"[green]✓ Found {len(urls)} URLs, {sum(len(p) for p in params_map.values())} parameters[/green]"
+                f"[green][OK] Found {len(urls)} URLs, {sum(len(p) for p in params_map.values())} parameters[/green]"
             )
 
             # Step 1.5: WAF Detection
-            console.print(f"\n[bold cyan]🛡️  Step 1.5: WAF Detection[/bold cyan]")
+            console.print(f"\n[bold cyan][WAF]  Step 1.5: WAF Detection[/bold cyan]")
             detected_waf = None
             try:
                 waf_resp = await client.get(
@@ -1414,7 +1414,7 @@ class ZevsScanner:
 
                 if detected_waf:
                     console.print(
-                        f"[bold yellow]⚠️  WAF detected: {detected_waf}[/bold yellow]"
+                        f"[bold yellow][WARN]  WAF detected: {detected_waf}[/bold yellow]"
                     )
                     console.print(
                         f"[yellow]   Loading {detected_waf}-specific bypass payloads[/yellow]"
@@ -1433,14 +1433,14 @@ class ZevsScanner:
                         rate_limiter.base_delay = 1.0 / rps
                         rate_limiter.jitter = jitter
                 else:
-                    console.print("[green]✓ No WAF detected[/green]")
+                    console.print("[green][OK] No WAF detected[/green]")
             except:
-                console.print("[yellow]⚠️  Could not detect WAF[/yellow]")
+                console.print("[yellow][WARN]  Could not detect WAF[/yellow]")
 
             self.stats["waf_detected"] = detected_waf or "None"
 
             # Step 2: Vulnerability scanning
-            console.print(f"\n[bold cyan]🔍 Step 2: Vulnerability Scanning[/bold cyan]")
+            console.print(f"\n[bold cyan][SCAN] Step 2: Vulnerability Scanning[/bold cyan]")
 
             vuln_modules = VulnModules(client, rate_limiter, waf=detected_waf)
 
@@ -1468,7 +1468,7 @@ class ZevsScanner:
                 )
 
                 for module_name, module_func in modules:
-                    console.print(f"\n[yellow]→ Testing {module_name}[/yellow]")
+                    console.print(f"\n[yellow]-> Testing {module_name}[/yellow]")
 
                     for url in urls:
                         params = params_map.get(url, [])
@@ -1490,7 +1490,7 @@ class ZevsScanner:
                         progress.update(task, advance=1)
 
             # Step 3: Deduplicate and calculate CVSS
-            console.print(f"\n[bold cyan]📊 Step 3: Processing Results[/bold cyan]")
+            console.print(f"\n[bold cyan][PROCESS] Step 3: Processing Results[/bold cyan]")
 
             seen = set()
             for finding in all_findings:
@@ -1511,11 +1511,11 @@ class ZevsScanner:
             self.stats["vulns_found"] = len(self.findings)
 
             console.print(
-                f"[green]✓ Found {len(self.findings)} unique vulnerabilities[/green]"
+                f"[green][OK] Found {len(self.findings)} unique vulnerabilities[/green]"
             )
 
             # Step 4: Generate reports
-            console.print(f"\n[bold cyan]📝 Step 4: Generating Reports[/bold cyan]")
+            console.print(f"\n[bold cyan][REPORT] Step 4: Generating Reports[/bold cyan]")
 
             output_dir = self.options.get("output", ".")
             domain = urlparse(self.target).netloc.replace(":", "_")
@@ -1528,7 +1528,7 @@ class ZevsScanner:
             html_path = f"{output_dir}/zevs_report_{domain}_{timestamp}.html"
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write(html_report)
-            console.print(f"[green]✓ HTML report: {html_path}[/green]")
+            console.print(f"[green][OK] HTML report: {html_path}[/green]")
 
             # JSON report
             json_path = f"{output_dir}/zevs_report_{domain}_{timestamp}.json"
@@ -1542,7 +1542,7 @@ class ZevsScanner:
                     f,
                     indent=2,
                 )
-            console.print(f"[green]✓ JSON report: {json_path}[/green]")
+            console.print(f"[green][OK] JSON report: {json_path}[/green]")
 
             # Summary
             console.print(
